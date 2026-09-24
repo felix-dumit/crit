@@ -873,6 +873,11 @@
     // so the shared helper owns read + apply.
     if (window.crit && window.crit.shared) window.crit.shared.applyCodeFontFromCookie();
     initSidebarWidths();
+    setFileTreeCollapsed(getSetting('fileTree', 'open') === 'collapsed');
+    // Comments panel starts hidden (no persistence yet, unlike file tree).
+    // Animation mirrors the left sidebar slide; persistence can be added later
+    // by reading getSetting('commentsPanel') here.
+    setCommentsPanelCollapsed(true);
 
     // Measure actual header height and set CSS variable for sticky offsets
     function updateHeaderHeight() {
@@ -1393,10 +1398,12 @@
     const panel = document.getElementById('fileTreePanel');
     if (files.length <= 1 && session.mode !== 'git') {
       panel.style.display = 'none';
+      syncSidebarToggleVisibility();
       renderMobileFilePicker();
       return;
     }
     panel.style.display = '';
+    syncSidebarToggleVisibility();
 
     // Stats
     let totalAdd = 0, totalDel = 0;
@@ -7284,13 +7291,12 @@
   function toggleCommentsPanel() {
     const panel = document.getElementById('commentsPanel');
     const isHidden = panel.classList.contains('comments-panel-hidden');
-    panel.classList.toggle('comments-panel-hidden');
+    setCommentsPanelCollapsed(!isHidden, true);
     if (isHidden) {
       // Close PR panel when opening comments
       document.getElementById('prPanel').classList.add('pr-panel-hidden');
       renderCommentsPanel();
     }
-    updateTocPosition();
   }
 
   function createPanelCommentCard(comment, filePath) {
@@ -7600,7 +7606,7 @@
     panel.classList.toggle('pr-panel-hidden');
     // Close comments panel if opening PR panel
     if (isHidden) {
-      document.getElementById('commentsPanel').classList.add('comments-panel-hidden');
+      setCommentsPanelCollapsed(true, true);
       renderPRPanel();
     }
     updateTocPosition();
@@ -9515,6 +9521,133 @@
     return reloadInFlight;
   }
 
+  // ===== Sidebar Toggle (file tree in diff mode, chapter rail in story) =====
+  // One header-left control; same icon. Diff: collapses the file tree.
+  // Story: collapses the chapter rail (desktop slide / mobile off-canvas drawer).
+  function isStoryMobileRail() {
+    return window.matchMedia('(max-width: 768px)').matches;
+  }
+
+  function isStoryRailCollapsed() {
+    if (isStoryMobileRail()) return !document.body.classList.contains('crit-story-rail-open');
+    return document.body.classList.contains('crit-story-rail-collapsed');
+  }
+
+  function syncSidebarToggleAria() {
+    const btn = document.getElementById('fileTreeToggle');
+    if (!btn) return;
+    const expanded = (typeof storyActive === 'function' && storyActive())
+      ? !isStoryRailCollapsed()
+      : !document.body.classList.contains('file-tree-collapsed');
+    btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+
+  // Keep the left toggle visible whenever story is active (chapter rail), even
+  // if renderFileTree ran before applyStoryPresence and hid it for single-file.
+  function syncSidebarToggleVisibility() {
+    const treeToggle = document.getElementById('fileTreeToggle');
+    if (!treeToggle) return;
+    if (typeof storyActive === 'function' && storyActive()) {
+      treeToggle.style.display = '';
+      return;
+    }
+    if (files.length <= 1 && session && session.mode !== 'git') {
+      treeToggle.style.display = 'none';
+    } else {
+      treeToggle.style.display = '';
+    }
+  }
+
+  function setFileTreeCollapsed(collapsed, animate) {
+    const panel = document.getElementById('fileTreePanel');
+    // Slide distance = the panel's own width, which the user can resize.
+    // The negative margin shifts the panel without changing its width, so
+    // this measures correctly in both directions.
+    const w = panel.getBoundingClientRect().width;
+    if (w > 0) document.body.style.setProperty('--file-tree-width', w + 'px');
+    if (animate) startFileTreeAnimation();
+    document.body.classList.toggle('file-tree-collapsed', collapsed);
+    setSetting('fileTree', collapsed ? 'collapsed' : 'open');
+    syncSidebarToggleAria();
+  }
+
+  // Arms the slide transition for the state change that follows. The forced
+  // style flush is the point: a transition declared in the same task as the
+  // change it should animate never runs, because the browser has no
+  // pre-change style with the transition live.
+  function startFileTreeAnimation() {
+    document.body.classList.add('file-tree-anim');
+    document.body.getBoundingClientRect();
+  }
+
+  function setStoryRailCollapsed(collapsed, animate) {
+    const rail = document.getElementById('storyRail');
+    if (!rail) return;
+    if (isStoryMobileRail()) {
+      document.body.classList.toggle('crit-story-rail-open', !collapsed);
+    } else {
+      const w = rail.getBoundingClientRect().width;
+      if (w > 0) document.body.style.setProperty('--story-rail-width', w + 'px');
+      if (animate) {
+        document.body.classList.add('story-rail-anim');
+        document.body.getBoundingClientRect();
+      }
+      document.body.classList.toggle('crit-story-rail-collapsed', collapsed);
+    }
+    syncSidebarToggleAria();
+  }
+
+  function toggleSidebar(animate) {
+    if (typeof storyActive === 'function' && storyActive()) {
+      setStoryRailCollapsed(!isStoryRailCollapsed(), animate);
+      return;
+    }
+    setFileTreeCollapsed(!document.body.classList.contains('file-tree-collapsed'), animate);
+  }
+
+  document.getElementById('fileTreeToggle').addEventListener('click', function() {
+    // Animate user toggles only — a sidebar restored collapsed at load
+    // shouldn't slide in.
+    toggleSidebar(true);
+  });
+
+  // Drop the rail class that doesn't apply on this breakpoint so a leftover
+  // crit-story-rail-collapsed can't keep the mobile drawer invisible under
+  // an open scrim (and vice versa).
+  (function wireStoryRailBreakpoint() {
+    const mq = window.matchMedia('(max-width: 768px)');
+    function onBreakpointChange() {
+      if (typeof storyActive !== 'function' || !storyActive()) return;
+      if (mq.matches) {
+        document.body.classList.remove('crit-story-rail-collapsed');
+      } else {
+        document.body.classList.remove('crit-story-rail-open');
+      }
+      syncSidebarToggleAria();
+    }
+    if (mq.addEventListener) mq.addEventListener('change', onBreakpointChange);
+    else if (mq.addListener) mq.addListener(onBreakpointChange);
+  })();
+
+  // ===== Comments Panel Toggle (mirrors file-tree slide on right) =====
+  function setCommentsPanelCollapsed(collapsed, animate) {
+    const panel = document.getElementById('commentsPanel');
+    if (!panel) return;
+    const w = panel.getBoundingClientRect().width;
+    if (w > 0) document.body.style.setProperty('--comments-panel-width', w + 'px');
+    if (animate) startCommentsPanelAnimation();
+    panel.classList.toggle('comments-panel-hidden', collapsed);
+    // Not persisted yet — keeps the existing "hidden after reload" test green.
+    // To mirror file-tree persistence, replace with:
+    // setSetting('commentsPanel', collapsed ? 'collapsed' : 'open');
+    updateTocPosition();
+  }
+
+  function startCommentsPanelAnimation() {
+    document.body.classList.add('comments-panel-anim');
+    document.body.getBoundingClientRect();
+  }
+
   // ===== TOC Toggle =====
   document.getElementById('tocToggle').addEventListener('click', function() {
     const tocEl = document.getElementById('toc');
@@ -9687,8 +9820,7 @@
   });
 
   document.querySelector('.comments-panel-close').addEventListener('click', function() {
-    document.getElementById('commentsPanel').classList.add('comments-panel-hidden');
-    updateTocPosition();
+    setCommentsPanelCollapsed(true, true);
   });
 
   document.getElementById('prToggle').addEventListener('click', function() {
@@ -10036,6 +10168,17 @@
         refreshHideResolvedView();
         const ht = document.getElementById('hideResolvedToggle');
         if (ht) ht.checked = isHideResolved();
+        break;
+      }
+      case 'toggle_file_tree': {
+        const treeBtn = document.getElementById('fileTreeToggle');
+        // CSS hides the button on mobile (diff) / single-file; inline style
+        // only covers the single-file path in renderFileTree. Read computed
+        // display so `b` no-ops whenever the control is meant to be unavailable.
+        // In story mode the same button stays visible and toggles the chapter rail.
+        if (!treeBtn || getComputedStyle(treeBtn).display === 'none') return;
+        e.preventDefault();
+        treeBtn.click();
         break;
       }
       case 'toggle_toc': {
@@ -11699,7 +11842,9 @@
     storyView = target;
     const hash = target === 'overview' ? '#story' : '#story/' + target;
     if (location.hash !== hash) history.replaceState(null, '', hash);
+    // Close the mobile chapter drawer on navigate; leave desktop collapsed state alone.
     document.body.classList.remove('crit-story-rail-open');
+    syncSidebarToggleAria();
     renderStory();
     resetStoryScroll();
   }
@@ -11727,12 +11872,15 @@
         // a #story hash un-hides (handled in the hashchange listener).
         document.body.classList.remove('crit-story-active');
         document.body.classList.remove('crit-story-rail-open');
+        document.body.classList.remove('crit-story-rail-collapsed');
         document.body.classList.add('crit-story-hidden');
       } else {
         document.body.classList.remove('crit-story-hidden');
         document.body.classList.add('crit-story-active');
         storyFromHash();
         renderStory();
+        syncSidebarToggleVisibility();
+        syncSidebarToggleAria();
       }
     } else {
       storyState = null;
@@ -11740,6 +11888,7 @@
       document.body.classList.remove('crit-story-active');
       document.body.classList.remove('crit-story-hidden');
       document.body.classList.remove('crit-story-rail-open');
+      document.body.classList.remove('crit-story-rail-collapsed');
       const inner = document.getElementById('storyPaneInner');
       if (inner) inner.innerHTML = '';
       const rail = document.getElementById('storyRail');
@@ -11747,6 +11896,7 @@
     }
     updateStoryViewToggle();
     updateDiffModeToggle();
+    syncSidebarToggleVisibility();
   }
 
   // "Hide story view" is a non-destructive view toggle (Task 7 user-feedback
@@ -11930,23 +12080,21 @@
       }
       case 'story_toggle_list':
         e.preventDefault();
-        document.body.classList.toggle('crit-story-rail-open');
+        setStoryRailCollapsed(!isStoryRailCollapsed(), true);
         return true;
       case 'Escape':
         if (document.body.classList.contains('crit-story-rail-open')) {
-          e.preventDefault(); document.body.classList.remove('crit-story-rail-open'); return true;
+          e.preventDefault(); setStoryRailCollapsed(true, true); return true;
         }
         return false;
     }
     return false;
   }
 
-  // Rail toggle + scrim wiring (safe when elements absent).
+  // Scrim closes the mobile chapter drawer (safe when element absent).
   (function wireStoryChrome() {
-    const toggle = document.getElementById('storyRailToggle');
-    if (toggle) toggle.addEventListener('click', function () { document.body.classList.toggle('crit-story-rail-open'); });
     const scrim = document.getElementById('storyRailScrim');
-    if (scrim) scrim.addEventListener('click', function () { document.body.classList.remove('crit-story-rail-open'); });
+    if (scrim) scrim.addEventListener('click', function () { setStoryRailCollapsed(true, true); });
     const storyViewToggle = document.getElementById('storyViewToggle');
     if (storyViewToggle) {
       storyViewToggle.addEventListener('click', function (e) {
